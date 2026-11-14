@@ -1,59 +1,81 @@
-# entry for make.fun
 #!/usr/bin/env python3
-"""Copy entry.png from this script's directory to $MAKEFUN_OUTPUT_DIR/entry.png.
+"""make.fun entry: publish entry.png into the harness output directory.
 
-Standard library only (Python 3.13+). The source image is resolved relative to
-this file via os.path.dirname(os.path.abspath(__file__)), the destination
+Standard library only (Python 3.13+). The image is located next to this file
+through ``os.path.dirname(os.path.abspath(__file__))``, the destination
 directory is created when missing, and the bytes are copied verbatim so the
-output is byte-identical to the source and fully deterministic.
+published file is byte-identical to the source.
+
+Destination directory resolution order:
+    1. $MAKEFUN_OUTPUT_DIR, when set to a non-empty value
+    2. /output  (make.fun runner default)
+
+Exit codes:
+    0  image copied and verified
+    1  source missing, destination not writable, or copy did not round-trip
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
 import shutil
 import sys
 
-SOURCE_NAME = "entry.png"
+IMAGE_NAME = "entry.png"
 DEFAULT_OUTPUT_DIR = "/output"
-CHUNK_SIZE = 1 << 20
 
 
-def sha256_file(path: str) -> str:
-    """Return the hex SHA-256 digest of a file."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(CHUNK_SIZE), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def source_path() -> str:
+    """Absolute path of entry.png sitting beside this script."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, IMAGE_NAME)
+
+
+def output_dir() -> str:
+    """Destination directory: $MAKEFUN_OUTPUT_DIR if usable, else /output."""
+    configured = os.environ.get("MAKEFUN_OUTPUT_DIR", "").strip()
+    return configured or DEFAULT_OUTPUT_DIR
+
+
+def same_bytes(left: str, right: str) -> bool:
+    """Compare two files chunk by chunk."""
+    with open(left, "rb") as a, open(right, "rb") as b:
+        while True:
+            chunk_a = a.read(1 << 16)
+            chunk_b = b.read(1 << 16)
+            if chunk_a != chunk_b:
+                return False
+            if not chunk_a:
+                return True
 
 
 def main() -> int:
-    source = os.path.join(os.path.dirname(os.path.abspath(__file__)), SOURCE_NAME)
-    output_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or DEFAULT_OUTPUT_DIR
-    destination = os.path.join(output_dir, SOURCE_NAME)
-
+    source = source_path()
     if not os.path.isfile(source):
         print(f"error: source image not found: {source}", file=sys.stderr)
         return 1
 
-    os.makedirs(output_dir, exist_ok=True)
+    target_dir = output_dir()
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"error: cannot create {target_dir}: {exc}", file=sys.stderr)
+        return 1
 
-    # copyfile writes the raw bytes only: no metadata, no re-encoding.
-    shutil.copyfile(source, destination)
+    destination = os.path.join(target_dir, IMAGE_NAME)
+    try:
+        # copyfile moves raw bytes only: no re-encoding, no metadata, no symlinks.
+        shutil.copyfile(source, destination)
+    except OSError as exc:
+        print(f"error: cannot write {destination}: {exc}", file=sys.stderr)
+        return 1
 
-    source_hash = sha256_file(source)
-    destination_hash = sha256_file(destination)
-    if source_hash != destination_hash:
-        print(
-            f"error: copy mismatch ({source_hash} != {destination_hash})",
-            file=sys.stderr,
-        )
+    if not same_bytes(source, destination):
+        print(f"error: copy mismatch for {destination}", file=sys.stderr)
         return 1
 
     size = os.path.getsize(destination)
-    print(f"wrote {destination} ({size} bytes, sha256 {destination_hash})")
+    print(f"copied {source} -> {destination} ({size} bytes)")
     return 0
 
 
